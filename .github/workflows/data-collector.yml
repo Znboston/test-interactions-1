@@ -1,0 +1,125 @@
+name: Data Collector
+
+on:
+  # Run on push to main branches to update data
+  push:
+    branches: [ main ]
+  # Run on pull requests to collect PR data
+  pull_request:
+    branches: [ main ]
+  # Run on a schedule to keep data fresh
+  schedule:
+    - cron: '0 */6 * * *'  # Run every 6 hours
+  # Allow manual triggering
+  workflow_dispatch:
+
+# Add permissions needed for pushing changes
+permissions:
+  contents: write
+
+jobs:
+  collect-data:
+    name: Collect Repository Data
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for all branches and tags
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+      
+      - name: Create data directory
+        run: mkdir -p ./data
+      
+      - name: Collect commit statistics
+        id: commit-stats
+        run: |
+          # Get total commit count
+          TOTAL_COMMITS=$(git rev-list --count HEAD)
+          
+          # Get commits in the last week
+          WEEK_COMMITS=$(git rev-list --count --since="1 week ago" HEAD)
+          
+          # Get commits in the last month
+          MONTH_COMMITS=$(git rev-list --count --since="1 month ago" HEAD)
+          
+          # Calculate percentage change
+          if [ $MONTH_COMMITS -ne 0 ]; then
+            WEEK_PERCENTAGE=$((WEEK_COMMITS * 100 / MONTH_COMMITS))
+            CHANGE_PERCENTAGE="+$WEEK_PERCENTAGE%"
+          else
+            CHANGE_PERCENTAGE="+0%"
+          fi
+          
+          # Create JSON data
+          echo "{\"totalCommits\": $TOTAL_COMMITS, \"weekCommits\": $WEEK_COMMITS, \"monthCommits\": $MONTH_COMMITS, \"changePercentage\": \"$CHANGE_PERCENTAGE\"}" > ./data/commit-stats.json
+          
+          echo "Commit statistics collected successfully"
+      
+      - name: Collect project statistics
+        id: project-stats
+        run: |
+          # Count active projects (assuming each directory in the workspace is a project)
+          ACTIVE_PROJECTS=$(find . -maxdepth 1 -type d | grep -v "^\.$" | grep -v "^\.\/\." | wc -l)
+          
+          # Create JSON data
+          echo "{\"activeProjects\": $ACTIVE_PROJECTS, \"codeCommits\": $TOTAL_COMMITS, \"activeShards\": 0, \"devHours\": 0, \"activeProjectsChange\": 0, \"codeCommitsChange\": \"$CHANGE_PERCENTAGE\", \"activeShardsChange\": 0, \"devHoursChange\": \"+0%\"}" > ./data/project-stats.json
+          
+          echo "Project statistics collected successfully"
+        env:
+          TOTAL_COMMITS: ${{ steps.commit-stats.outputs.total_commits }}
+          CHANGE_PERCENTAGE: ${{ steps.commit-stats.outputs.change_percentage }}
+      
+      - name: Collect recent activity
+        id: recent-activity
+        run: |
+          # Get recent commits
+          RECENT_COMMITS=$(git log --pretty=format:'{%n  "id": "%h",%n  "type": "code",%n  "title": "Code Commit",%n  "description": "%s",%n  "timestamp": "%ci",%n  "timeAgo": "%cr"%n},' -n 10)
+          
+          # Remove trailing comma and wrap in array
+          RECENT_COMMITS="[${RECENT_COMMITS%,}]"
+          
+          # Save to file
+          echo "$RECENT_COMMITS" > ./data/recent-activity.json
+          
+          echo "Recent activity collected successfully"
+      
+      - name: Collect contributor statistics
+        id: contributor-stats
+        run: |
+          # Get contributor statistics
+          CONTRIBUTORS=$(git shortlog -sne --all | awk '{$1=""; print substr($0,2)}' | sed 's/ </|</g' | awk -F'|' '{print "{\"name\": \""$1"\", \"email\": \""$2"\", \"commits\": "NR"}"}' | tr '\n' ',' | sed 's/,$//')
+          
+          # Wrap in array
+          CONTRIBUTORS="[$CONTRIBUTORS]"
+          
+          # Save to file
+          echo "$CONTRIBUTORS" > ./data/contributor-stats.json
+          
+          echo "Contributor statistics collected successfully"
+      
+      - name: Commit and push data files
+        run: |
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Add data files
+          git add ./data/*.json
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            # Commit and push changes
+            git commit -m "Update dashboard data [skip ci]"
+            # Use the GitHub token to push changes
+            git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:${{ github.ref }}
+          fi
+        # Only run this step on scheduled runs or manual triggers, not on PRs
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
